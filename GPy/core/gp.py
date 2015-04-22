@@ -4,6 +4,7 @@
 import numpy as np
 import sys
 from .. import kern
+from GPy.kern._src.rbf import RBF
 from model import Model
 from parameterization import ObsAr
 from .. import likelihoods
@@ -193,6 +194,133 @@ class GP(Model):
         #force mu to be a column vector
         if len(mu.shape)==1: mu = mu[:,None]
         return mu, var
+
+    def predict_from_unsure_input(self, Xnew_mu, Xnew_covar):
+        """
+        Predict the functions' mean and variance at the new points distributed by Xnew, where Xnew is assumed
+        to be normal distributed with mean Xnew_mu and variance Xnew_var.
+        This function only works for an RBF kernel.
+
+        :param Xnew_mu: The mean of the points at which to make a prediction
+        :type Xnew_mu: np.ndarray (Nnew x self.input_dim)
+        :param Xnew_covar: The covariance w.r.t. the input dimensions of the points at which to make a prediction
+        :type Xnew_covar: np.ndarray (Nnew x self.input_dim x self.input_dim)
+        :returns: (mean, covar):
+            mean: posterior mean, a Numpy array, Nnew x self.output_dim
+            cov: posterior covariance, a Numpy array, Nnew x self.output_dim x self.output_dim
+
+           Note that the covariance is calculated w.r.t. the output dimensions for each sample
+           and not w.r.t. to the samples, as it is common with GPs.
+        """
+
+        if not isinstance(self.kern, RBF):
+            raise ValueError("predict_from_unsure_input only works with an RBF kernel")
+
+        #######################################################################################
+        # inputs:
+        n_smpls = Xnew_mu.shape[0]
+        # mu[new_smpl, feature] = Xnew_mu
+        mu = Xnew_mu
+        # Sigma[new_smpl, feature, feature] = Xnew_covar
+        Sigma = Xnew_covar
+
+        # kernel parameters:
+        # lengthscale[feature]
+        lengthscale = self.kern.lengthscale
+        if lengthscale.shape[0] == 1:
+            lengthscale = lengthscale * np.ones(self.input_dim)
+        # LambdaInv[feature, feature]
+        LambdaInv = np.diag(lengthscale**2)
+
+        # alpha2 (scalar)
+        alpha2 = self.kern.variance
+
+        # training data:
+        # self.X[X_smpl, feature]
+        # beta[X_smpl, out_dim] = woodbury_vector
+        beta = self.posterior.woodbury_vector
+        #######################################################################################
+
+        #######################################################################################
+        # calculate predictive mean, eq. (9)
+
+        # dxmu[new_smpl, X_smpl, feature]
+        dxmu = self.X[np.newaxis,:,:] - mu[:,np.newaxis,:]
+
+        # SigmaPlusLambdaInv[new_xmpl, feature, feature]
+        SigmaPlusLambdaInv = Sigma + 1. / LambdaInv[np.newaxis,:,:]
+
+        # DSigmaPlusLambdaInvD[new_smpl, X_smpl]
+        DSigmaPlusLambdaInvD = np.einsum("sif,sfg,sig->si", dxmu, SigmaPlusLambdaInv, dxmu)
+
+        # SigmaLambdaInvPlusId[new_smpl, feature, feature]
+        SigmaLambdaInvPlusId = np.einsum("sik,kj->sij", Sigma, LambdaInv) + np.identity(self.input_dim)[np.newaxis,:,:]
+
+        # SigmaLambdaInvPlusIdDet[new_smpl]
+        SigmaLambdaInvPlusIdDet = np.zeros((n_smpls,))
+        for s in range(n_smpls):
+            SigmaLambdaInvPlusIdDet[s] = np.linalg.det(SigmaLambdaInvPlusId[s,:,:])
+
+        # l[new_smpl, X_smpl]
+        l = alpha2 * (SigmaLambdaInvPlusIdDet**(-0.5))[:,np.newaxis] * np.exp(-0.5 * DSigmaPlusLambdaInvD)
+
+        # p_mean[new_smpl, out_dim]
+        p_mean = np.dot(l, beta)
+        #######################################################################################
+
+        #######################################################################################
+        # calculate predictive covariance of output dimensions
+
+        # k* = ks[new_smpl, X_smpl]
+        ks = alpha2 * np.exp(-0.5 * lengthscale[np.newaxis,np.newaxis,:] * dxmu**2)
+
+        # LambdaInvSigma[new_smpl, feature, feature]
+        LambdaInvSigma = np.einsum("fg,sgh->sfh", LambdaInv, Sigma)
+
+        # TwoLambdaInvSigmaPlusId[new_smpl, feature, feature]
+        TwoLambdaInvSigmaPlusId = 2 * LambdaInvSigma + np.identity(self.input_dim)[np.newaxis,:,:]
+
+        # TwoLambdaInvSigmaPlusIdDet[new_smpl]
+        TwoLambdaInvSigmaPlusIdDet = np.zeros((n_smpls,))
+        for s in range(n_smpls):
+            TwoLambdaInvSigmaPlusIdDet[s] = np.linalg.det(TwoLambdaInvSigmaPlusId[s,:,:])
+
+        # dxx[X_smpl, X_smpl, feature]
+        dxx = self.X[:,np.newaxis,:] - self.X[np.newaxis,:,:]
+
+        # DxxLambdaInvDxx[X_smpl, X_smpl]
+        DxxLambdaInvDxx = np.sum(lengthscale[np.newaxis,np.newaxis,:] * dxx**2, axis=2)
+
+        # z[X_smpl, X_smpl, feature]
+        z = 0.5 * (self.X[:,np.newaxis,:] + self.X[np.newaxis,:,:])
+
+        # gamma[new_smpl, X_smpl, X_smpl, feature]
+        gamma = z[np.newaxis,:,:,:] - mu[:,np.newaxis,np.newaxis,:]
+
+        # HalfLambdaPlusSigma[new_smpl, feature, feature]
+        HalfLambdaPlusSigma = 0.5 / LambdaInv[np.newaxis,:,:] + Sigma
+
+        # HalfLambdaPlusSigmaInv[new_smpl, feature, feature]
+        HalfLambdaPlusSigmaInv = np.zeros_like(HalfLambdaPlusSigma)
+        for s in range(n_smpls):
+            HalfLambdaPlusSigmaInv[s,:,:] = np.linalg.inv(HalfLambdaPlusSigma[s,:,:])
+
+        # GammaHalfLambdaPlusSigmaInvGamma[new_smpl, X_smpl, X_smpl]
+        GammaHalfLambdaPlusSigmaInvGamma = np.einsum("sijf,sfg,sijg->sij", gamma, HalfLambdaPlusSigmaInv, gamma)
+
+        # L[new_smpl, X_smpl, X_smpl], eq. (12)
+        L = (alpha2**2 * TwoLambdaInvSigmaPlusIdDet[:,np.newaxis,np.newaxis]**(-0.5) *
+             np.exp(-0.25 * DxxLambdaInvDxx[np.newaxis,:,:]) *
+             np.exp(-0.5 * GammaHalfLambdaPlusSigmaInvGamma))
+
+        # Eh[new_smpl, out_dim, out_dim]
+        Eh = np.einsum("xo,mxy,yp->mop", beta, L, beta)
+
+        # p_cov[new_smpl, out_dim, out_dim]
+        p_cov = Eh - mu[:,:,np.newaxis] * mu[:,np.newaxis,:]
+        #######################################################################################
+
+        return p_mean, p_cov
 
     def predict(self, Xnew, full_cov=False, Y_metadata=None, kern=None):
         """
