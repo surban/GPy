@@ -225,20 +225,30 @@ class GP(Model):
         Sigma = Xnew_covar
 
         # kernel parameters:
-        # lengthscale[feature]
-        lengthscale = self.kern.lengthscale
-        if lengthscale.shape[0] == 1:
-            lengthscale = lengthscale * np.ones(self.input_dim)
+        # ls[feature]
+        ls = 1. / self.kern.lengthscale ** 2
+        if ls.shape[0] == 1:
+            ls = ls * np.ones(self.input_dim)
         # LambdaInv[feature, feature]
-        LambdaInv = np.diag(lengthscale**2)
+        LambdaInv = np.diag(ls)
+        # Lambda[feature, feature]
+        Lambda = np.diag(1. / ls)
+
+        # print "ls=", ls
+        # print "LambdaInv=", LambdaInv
 
         # alpha2 (scalar)
-        alpha2 = self.kern.variance
+        alpha2 = np.asarray(self.kern.variance)
+
+        # print "alpha2=", alpha2
 
         # training data:
         # self.X[X_smpl, feature]
         # beta[X_smpl, out_dim] = woodbury_vector
         beta = self.posterior.woodbury_vector
+
+        # print "self.X=\n", self.X
+        # print "beta=\n", beta
         #######################################################################################
 
         #######################################################################################
@@ -246,20 +256,29 @@ class GP(Model):
 
         # dxmu[new_smpl, X_smpl, feature]
         dxmu = self.X[np.newaxis,:,:] - mu[:,np.newaxis,:]
+        # print "dxmu=\n", dxmu
+
+        # SigmaPlusLambda[new_xmpl, feature, feature]
+        SigmaPlusLambda = Sigma + Lambda[np.newaxis,:,:]
 
         # SigmaPlusLambdaInv[new_xmpl, feature, feature]
-        SigmaPlusLambdaInv = Sigma + 1. / LambdaInv[np.newaxis,:,:]
+        SigmaPlusLambdaInv = np.zeros_like(SigmaPlusLambda)
+        for s in range(n_smpls):
+            SigmaPlusLambdaInv[s,:,:] = np.linalg.inv(SigmaPlusLambda[s,:,:])
+        # print "SigmaPlusLambdaInv=\n", SigmaPlusLambdaInv
 
         # DSigmaPlusLambdaInvD[new_smpl, X_smpl]
         DSigmaPlusLambdaInvD = np.einsum("sif,sfg,sig->si", dxmu, SigmaPlusLambdaInv, dxmu)
 
         # SigmaLambdaInvPlusId[new_smpl, feature, feature]
         SigmaLambdaInvPlusId = np.einsum("sik,kj->sij", Sigma, LambdaInv) + np.identity(self.input_dim)[np.newaxis,:,:]
+        # print "SigmaLambdaInvPlusId=\n", SigmaLambdaInvPlusId
 
         # SigmaLambdaInvPlusIdDet[new_smpl]
         SigmaLambdaInvPlusIdDet = np.zeros((n_smpls,))
         for s in range(n_smpls):
             SigmaLambdaInvPlusIdDet[s] = np.linalg.det(SigmaLambdaInvPlusId[s,:,:])
+        # print "SigmaLambdaInvPlusIdDet=\n", SigmaLambdaInvPlusIdDet
 
         # l[new_smpl, X_smpl]
         l = alpha2 * (SigmaLambdaInvPlusIdDet**(-0.5))[:,np.newaxis] * np.exp(-0.5 * DSigmaPlusLambdaInvD)
@@ -268,11 +287,14 @@ class GP(Model):
         p_mean = np.dot(l, beta)
         #######################################################################################
 
+
+
         #######################################################################################
         # calculate predictive covariance of output dimensions
 
         # k* = ks[new_smpl, X_smpl]
-        ks = alpha2 * np.exp(-0.5 * lengthscale[np.newaxis,np.newaxis,:] * dxmu**2)
+        ks = alpha2 * np.exp(-0.5 * np.sum(ls[np.newaxis,np.newaxis,:] * dxmu**2, axis=2))
+        # print "ks=\n", ks
 
         # LambdaInvSigma[new_smpl, feature, feature]
         LambdaInvSigma = np.einsum("fg,sgh->sfh", LambdaInv, Sigma)
@@ -289,7 +311,7 @@ class GP(Model):
         dxx = self.X[:,np.newaxis,:] - self.X[np.newaxis,:,:]
 
         # DxxLambdaInvDxx[X_smpl, X_smpl]
-        DxxLambdaInvDxx = np.sum(lengthscale[np.newaxis,np.newaxis,:] * dxx**2, axis=2)
+        DxxLambdaInvDxx = np.sum(ls[np.newaxis,np.newaxis,:] * dxx**2, axis=2)
 
         # z[X_smpl, X_smpl, feature]
         z = 0.5 * (self.X[:,np.newaxis,:] + self.X[np.newaxis,:,:])
@@ -298,7 +320,7 @@ class GP(Model):
         gamma = z[np.newaxis,:,:,:] - mu[:,np.newaxis,np.newaxis,:]
 
         # HalfLambdaPlusSigma[new_smpl, feature, feature]
-        HalfLambdaPlusSigma = 0.5 / LambdaInv[np.newaxis,:,:] + Sigma
+        HalfLambdaPlusSigma = 0.5 * Lambda[np.newaxis,:,:] + Sigma
 
         # HalfLambdaPlusSigmaInv[new_smpl, feature, feature]
         HalfLambdaPlusSigmaInv = np.zeros_like(HalfLambdaPlusSigma)
@@ -317,7 +339,7 @@ class GP(Model):
         Eh = np.einsum("xo,mxy,yp->mop", beta, L, beta)
 
         # p_cov[new_smpl, out_dim, out_dim]
-        p_cov = Eh - mu[:,:,np.newaxis] * mu[:,np.newaxis,:]
+        p_cov = Eh - p_mean[:,:,np.newaxis] * p_mean[:,np.newaxis,:]
         #######################################################################################
 
         return p_mean, p_cov
