@@ -248,8 +248,6 @@ class GP(Model):
         # SigmaE2 (scalar)
         SigmaE2 = np.asarray(self.likelihood.variance)
 
-        # print "alpha2=", alpha2
-
         # training data:
         # self.X[X_smpl, feature]
         # self.Y[X_smpl, out_dim]
@@ -285,9 +283,7 @@ class GP(Model):
         SigmaPlusLambda = Sigma + Lambda[np.newaxis,:,:]
 
         # SigmaPlusLambdaInv[new_xmpl, feature, feature]
-        SigmaPlusLambdaInv = np.zeros_like(SigmaPlusLambda)
-        for s in range(n_smpls):
-            SigmaPlusLambdaInv[s,:,:] = np.linalg.inv(SigmaPlusLambda[s,:,:])
+        SigmaPlusLambdaInv = np.linalg.inv(SigmaPlusLambda)
 
         # DSigmaPlusLambdaInvD[new_smpl, X_smpl]
         DSigmaPlusLambdaInvD = np.einsum("sif,sfg,sig->si", dxmu, SigmaPlusLambdaInv, dxmu)
@@ -296,9 +292,7 @@ class GP(Model):
         SigmaLambdaInvPlusId = np.einsum("sik,kj->sij", Sigma, LambdaInv) + np.identity(self.input_dim)[np.newaxis,:,:]
 
         # SigmaLambdaInvPlusIdDet[new_smpl]
-        SigmaLambdaInvPlusIdDet = np.zeros((n_smpls,))
-        for s in range(n_smpls):
-            SigmaLambdaInvPlusIdDet[s] = np.linalg.det(SigmaLambdaInvPlusId[s,:,:])
+        SigmaLambdaInvPlusIdDet = np.linalg.det(SigmaLambdaInvPlusId)
 
         # l[new_smpl, X_smpl]
         l = alpha2 * (SigmaLambdaInvPlusIdDet**(-0.5))[:,np.newaxis] * np.exp(-0.5 * DSigmaPlusLambdaInvD)
@@ -320,9 +314,7 @@ class GP(Model):
         TwoLambdaInvSigmaPlusId = 2 * LambdaInvSigma + np.identity(self.input_dim)[np.newaxis,:,:]
 
         # TwoLambdaInvSigmaPlusIdDet[new_smpl]
-        TwoLambdaInvSigmaPlusIdDet = np.zeros((n_smpls,))
-        for s in range(n_smpls):
-            TwoLambdaInvSigmaPlusIdDet[s] = np.linalg.det(TwoLambdaInvSigmaPlusId[s,:,:])
+        TwoLambdaInvSigmaPlusIdDet = np.linalg.det(TwoLambdaInvSigmaPlusId)
 
         # z[X_smpl, X_smpl, feature]
         z = 0.5 * (self.X[:,np.newaxis,:] + self.X[np.newaxis,:,:])
@@ -334,9 +326,7 @@ class GP(Model):
         HalfLambdaPlusSigma = 0.5 * Lambda[np.newaxis,:,:] + Sigma
 
         # HalfLambdaPlusSigmaInv[new_smpl, feature, feature]
-        HalfLambdaPlusSigmaInv = np.zeros_like(HalfLambdaPlusSigma)
-        for s in range(n_smpls):
-            HalfLambdaPlusSigmaInv[s,:,:] = np.linalg.inv(HalfLambdaPlusSigma[s,:,:])
+        HalfLambdaPlusSigmaInv = np.linalg.inv(HalfLambdaPlusSigma)
 
         # GammaHalfLambdaPlusSigmaInvGamma[new_smpl, X_smpl, X_smpl]
         GammaHalfLambdaPlusSigmaInvGamma = np.einsum("sijf,sfg,sijg->sij", gamma, HalfLambdaPlusSigmaInv, gamma)
