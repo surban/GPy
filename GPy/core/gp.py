@@ -196,7 +196,7 @@ class GP(Model):
         if len(mu.shape)==1: mu = mu[:,None]
         return mu, var
 
-    def predict_from_unsure_input(self, Xnew_mu, Xnew_covar):
+    def predict_uncertain(self, Xnew_mu, Xnew_covar):
         """
         Predict the functions' mean and variance at the new points distributed by Xnew, where Xnew is assumed
         to be normal distributed with mean Xnew_mu and variance Xnew_var.
@@ -208,7 +208,7 @@ class GP(Model):
         :type Xnew_covar: np.ndarray (Nnew x self.input_dim x self.input_dim)
         :returns: (mean, covar):
             mean: posterior mean, a Numpy array, Nnew x self.output_dim
-            cov: posterior covariance, a Numpy array, Nnew x self.output_dim x self.output_dim
+            covar: posterior covariance, a Numpy array, Nnew x self.output_dim x self.output_dim
 
            Note that the covariance is calculated w.r.t. the output dimensions for each sample
            and not w.r.t. to the samples, as it is common with GPs.
