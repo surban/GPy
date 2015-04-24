@@ -5,6 +5,7 @@ import numpy as np
 import sys
 from .. import kern
 from GPy.kern._src.rbf import RBF
+from GPy.likelihoods.gaussian import Gaussian
 from model import Model
 from parameterization import ObsAr
 from .. import likelihoods
@@ -214,7 +215,14 @@ class GP(Model):
         """
 
         if not isinstance(self.kern, RBF):
-            raise ValueError("predict_from_unsure_input only works with an RBF kernel")
+            raise ValueError("predict_from_unsure_input only works with RBF kernel")
+        if not isinstance(self.likelihood, Gaussian):
+            raise ValueError("predict_from_unsure_input only works with Gaussian likelihood")
+        if Xnew_mu.shape[0] != Xnew_covar.shape[0]:
+            raise ValueError("Xnew_mu and Xnew_covar must have same number of samples")
+        if (Xnew_mu.shape[1] != self.input_dim or Xnew_covar.shape[1] != self.input_dim or
+                Xnew_covar.shape[2] != self.input_dim):
+            raise ValueError("Wrong number of input dimensions provided")
 
         #######################################################################################
         # inputs:
@@ -234,21 +242,37 @@ class GP(Model):
         # Lambda[feature, feature]
         Lambda = np.diag(1. / ls)
 
-        # print "ls=", ls
-        # print "LambdaInv=", LambdaInv
-
         # alpha2 (scalar)
         alpha2 = np.asarray(self.kern.variance)
+
+        # SigmaE2 (scalar)
+        SigmaE2 = np.asarray(self.likelihood.variance)
 
         # print "alpha2=", alpha2
 
         # training data:
         # self.X[X_smpl, feature]
-        # beta[X_smpl, out_dim] = woodbury_vector
-        beta = self.posterior.woodbury_vector
+        # self.Y[X_smpl, out_dim]
 
-        # print "self.X=\n", self.X
-        # print "beta=\n", beta
+        # dxx[X_smpl, X_smpl, feature]
+        dxx = self.X[:,np.newaxis,:] - self.X[np.newaxis,:,:]
+
+        # DxxLambdaInvDxx[X_smpl, X_smpl]
+        DxxLambdaInvDxx = np.sum(ls[np.newaxis,np.newaxis,:] * dxx**2, axis=2)
+
+        # Kxx[X_smpl, X_smpl]
+        #Kxx = alpha2 * np.exp(-0.5 * DxxLambdaInvDxx)
+
+        # KxxPlusSigmaE[X_smpl, X_smpl]
+        #KxxPlusSigmaE = Kxx + SigmaE2 * np.identity(Kxx.shape[0])
+
+        # Beta[X_smpl, X_smpl] = woodbury_inv
+        #Beta = np.linalg.inv(KxxPlusSigmaE)
+        Beta = self.posterior.woodbury_inv
+
+        # beta[X_smpl, out_dim] = woodbury_vector
+        #beta = np.dot(Beta, self.Y)
+        beta = self.posterior.woodbury_vector
         #######################################################################################
 
         #######################################################################################
@@ -256,7 +280,6 @@ class GP(Model):
 
         # dxmu[new_smpl, X_smpl, feature]
         dxmu = self.X[np.newaxis,:,:] - mu[:,np.newaxis,:]
-        # print "dxmu=\n", dxmu
 
         # SigmaPlusLambda[new_xmpl, feature, feature]
         SigmaPlusLambda = Sigma + Lambda[np.newaxis,:,:]
@@ -265,20 +288,17 @@ class GP(Model):
         SigmaPlusLambdaInv = np.zeros_like(SigmaPlusLambda)
         for s in range(n_smpls):
             SigmaPlusLambdaInv[s,:,:] = np.linalg.inv(SigmaPlusLambda[s,:,:])
-        # print "SigmaPlusLambdaInv=\n", SigmaPlusLambdaInv
 
         # DSigmaPlusLambdaInvD[new_smpl, X_smpl]
         DSigmaPlusLambdaInvD = np.einsum("sif,sfg,sig->si", dxmu, SigmaPlusLambdaInv, dxmu)
 
         # SigmaLambdaInvPlusId[new_smpl, feature, feature]
         SigmaLambdaInvPlusId = np.einsum("sik,kj->sij", Sigma, LambdaInv) + np.identity(self.input_dim)[np.newaxis,:,:]
-        # print "SigmaLambdaInvPlusId=\n", SigmaLambdaInvPlusId
 
         # SigmaLambdaInvPlusIdDet[new_smpl]
         SigmaLambdaInvPlusIdDet = np.zeros((n_smpls,))
         for s in range(n_smpls):
             SigmaLambdaInvPlusIdDet[s] = np.linalg.det(SigmaLambdaInvPlusId[s,:,:])
-        # print "SigmaLambdaInvPlusIdDet=\n", SigmaLambdaInvPlusIdDet
 
         # l[new_smpl, X_smpl]
         l = alpha2 * (SigmaLambdaInvPlusIdDet**(-0.5))[:,np.newaxis] * np.exp(-0.5 * DSigmaPlusLambdaInvD)
@@ -287,14 +307,11 @@ class GP(Model):
         p_mean = np.dot(l, beta)
         #######################################################################################
 
-
-
         #######################################################################################
         # calculate predictive covariance of output dimensions
 
         # k* = ks[new_smpl, X_smpl]
         ks = alpha2 * np.exp(-0.5 * np.sum(ls[np.newaxis,np.newaxis,:] * dxmu**2, axis=2))
-        # print "ks=\n", ks
 
         # LambdaInvSigma[new_smpl, feature, feature]
         LambdaInvSigma = np.einsum("fg,sgh->sfh", LambdaInv, Sigma)
@@ -306,12 +323,6 @@ class GP(Model):
         TwoLambdaInvSigmaPlusIdDet = np.zeros((n_smpls,))
         for s in range(n_smpls):
             TwoLambdaInvSigmaPlusIdDet[s] = np.linalg.det(TwoLambdaInvSigmaPlusId[s,:,:])
-
-        # dxx[X_smpl, X_smpl, feature]
-        dxx = self.X[:,np.newaxis,:] - self.X[np.newaxis,:,:]
-
-        # DxxLambdaInvDxx[X_smpl, X_smpl]
-        DxxLambdaInvDxx = np.sum(ls[np.newaxis,np.newaxis,:] * dxx**2, axis=2)
 
         # z[X_smpl, X_smpl, feature]
         z = 0.5 * (self.X[:,np.newaxis,:] + self.X[np.newaxis,:,:])
@@ -338,8 +349,18 @@ class GP(Model):
         # Eh[new_smpl, out_dim, out_dim]
         Eh = np.einsum("xo,mxy,yp->mop", beta, L, beta)
 
+        # BetaL[new_smpl, X_smpl, X_smpl]
+        BetaL = np.einsum("xy,syz->sxz", Beta, L)
+
+        # TrBetaL[new_smpl]
+        TrBetaL = np.einsum("sxx->s", BetaL)
+
+        # Alpha2PlusTrBetaL[new_smpl, out_dim, out_dim]
+        Alpha2PlusTrBetaL = np.identity(self.output_dim)[np.newaxis,:,:] * (alpha2 - TrBetaL[:,np.newaxis,np.newaxis] + SigmaE2)
+
         # p_cov[new_smpl, out_dim, out_dim]
-        p_cov = Eh - p_mean[:,:,np.newaxis] * p_mean[:,np.newaxis,:]
+        p_cov = Eh - p_mean[:,:,np.newaxis] * p_mean[:,np.newaxis,:] + Alpha2PlusTrBetaL
+
         #######################################################################################
 
         return p_mean, p_cov
